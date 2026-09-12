@@ -26,6 +26,7 @@ import json
 import os
 import random
 import sys
+import time
 import urllib.request
 
 BASE = "https://api.trae.cn"
@@ -118,6 +119,27 @@ def random_device_id():
     return str(random.randint(10**15, 10**16 - 1))
 
 
+def checkin_with_retry(token: str, device_id: str, name: str, max_attempts: int = 7) -> dict:
+    """签到 claim；对 9074(参与用户太多) 及临时性 5xx/429 做递增间隔重试，总计约8分钟。"""
+    delays = [20, 40, 60, 90, 120, 150]
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        result = checkin(token, device_id)
+        body = result["body"]
+        code = body.get("code", -1)
+        if result["http"] == 200 and (code == 0 or body.get("checked_in", False)):
+            return result
+        transient = (code == 9074) or (result["http"] in (429, 500, 502, 503, 504))
+        if transient and attempt < max_attempts:
+            d = delays[min(attempt - 1, len(delays) - 1)]
+            print("[%s] 服务器繁忙(code=%s http=%s)，%d秒后重试(%d/%d)"
+                  % (name, code, result["http"], d, attempt, max_attempts - 1), flush=True)
+            time.sleep(d)
+            continue
+        return result
+    return result
+
+
 def main():
     accounts = list(iter_sessions())
     if not accounts:
@@ -135,7 +157,7 @@ def main():
         try:
             token = get_token(session)
             print("[%s] 已换取新 JWT，长度=%d" % (name, len(token)))
-            result = checkin(token, device_id)
+            result = checkin_with_retry(token, device_id, name)
             body = result["body"]
             code = body.get("code", -1)
             checked = body.get("checked_in", False)
